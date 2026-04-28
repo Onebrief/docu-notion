@@ -15,8 +15,8 @@ on:
       - "v*-onebrief"
     paths-ignore:
       - "**/*.md"
-      - ".github/**"
       - "docs/**"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
