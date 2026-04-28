@@ -1,0 +1,94 @@
+name: Auto release on push
+
+# Auto-versions, tags, builds, and publishes a tarball release on every push
+# to a v*-onebrief branch. The "base" version is read from package.json
+# (e.g., "0.16.3-onebrief.0" → base "0.16.3-onebrief"); the trailing counter
+# is incremented from the highest existing v<base>.* git tag.
+#
+# To bump the base (e.g., to track 0.16.4 from upstream): edit
+# package.json's `version` field to "0.16.4-onebrief.0" and push. The
+# counter for the new base starts fresh.
+
+on:
+  push:
+    branches:
+      - "v*-onebrief"
+    paths-ignore:
+      - "**/*.md"
+      - ".github/**"
+      - "docs/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full tag history for version computation
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Compute next version
+        id: version
+        run: |
+          BASE_VERSION=$(node -e "console.log(require('./package.json').version)")
+          BASE="${BASE_VERSION%.*}"
+          echo "Base: $BASE (from package.json $BASE_VERSION)"
+
+          # Find highest existing counter for this base. `--sort=-v:refname`
+          # gives proper semver-aware ordering.
+          LATEST=$(git tag --list "v${BASE}.*" --sort=-v:refname | head -n1)
+          if [ -z "$LATEST" ]; then
+            NEXT_NUM=0
+          else
+            CURRENT_NUM="${LATEST##*.}"
+            NEXT_NUM=$((CURRENT_NUM + 1))
+          fi
+          NEXT="${BASE}.${NEXT_NUM}"
+          TAG="v${NEXT}"
+
+          echo "Next: $TAG"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Set package.json version
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Install (runs prepare → builds dist/)
+        run: npm ci
+
+      - name: Pack
+        id: pack
+        run: |
+          npm pack
+          TARBALL=$(ls -1t *.tgz | head -n1)
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "Packed: $TARBALL"
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Tag the release commit
+        run: |
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "${{ steps.pack.outputs.tarball }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes
